@@ -1,5 +1,5 @@
 {
-  "subdomain": "adjisoft",
+  "subdomain": "contoh",
   "record": {
     "type": "CNAME",
     "value": "adjisoft.github.io",
