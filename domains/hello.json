@@ -4,6 +4,6 @@
     "type": "CNAME",
     "value": "adjisoft.github.io",
     "ttl": 3600,
-    "proxied": false
+    "proxied": true
   }
 }
