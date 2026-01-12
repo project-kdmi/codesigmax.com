@@ -26,7 +26,7 @@ FREE SUBDOMAIN REGISTRY
 
 ## Rules dan ToS
 1. Dilarang menyalahgunakan subdomain sebagai domain phising, logger, scam, judi, pornografi, NSFW dan lainnya yang berkaitan illegal **AKAN DIKENAKAN PENGHAPUSAN DOMAIN SEBAGAI SANKSINYA!!**
-2. Proyek wajib open source jika kamu ingin membuat proyek closed source/keperluan bisnis kamu wajib donasi ke [Saweria](https://saweria.com/riskiaji)
+2. Proyek wajib open source jika kamu ingin membuat proyek closed source/keperluan bisnis kamu wajib donasi ke [Saweria](https://saweria.co/riskiaji)
 3. Wajib satu domain per orang jika lebih maka **PENGHAPUSAN DOMAIN AKAN DILAKUKAN!!**
 4. Subdomain wajib harus aktif jika tidak aktif maka akan dihapus dalam kurun waktu yang dekat.
 
