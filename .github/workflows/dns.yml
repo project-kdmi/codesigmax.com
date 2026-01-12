@@ -12,8 +12,8 @@ jobs:
   validate:
     runs-on: ubuntu-latest
     outputs:
-      is_valid: ${{ steps.validate-schema.outputs.is_valid }}
-      changed_files: ${{ steps.get-changes.outputs.all_changed_files }}
+      is_valid: ${{ steps.validation.outputs.is_valid }}
+      changed_files: ${{ steps.get-changes.outputs.changed_files }}
     
     steps:
       - name: Checkout code
@@ -24,98 +24,171 @@ jobs:
       - name: Get changed files
         id: get-changes
         run: |
+          echo "🔍 Detecting changed files..."
+          
+          # Deteksi file yang berubah
           if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "Mode: Pull Request"
             git fetch origin ${{ github.base_ref }}
-            CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }} ${{ github.sha }} -- domains/)
+            CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }} ${{ github.sha }} -- domains/ || true)
           else
-            CHANGED_FILES=$(git diff --name-only HEAD^ HEAD -- domains/)
+            echo "Mode: Push to main"
+            # Untuk push pertama (tanpa parent), gunakan semua file
+            if git log --oneline -2 > /dev/null 2>&1; then
+              CHANGED_FILES=$(git diff --name-only HEAD^ HEAD -- domains/ || true)
+            else
+              CHANGED_FILES=$(find domains/ -name "*.json" | tr '\n' ' ')
+            fi
           fi
           
-          echo "Changed files:"
-          echo "$CHANGED_FILES"
-          echo "all_changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
+          echo "Changed files found: $CHANGED_FILES"
+          
+          # Simpan output dengan cara yang benar
+          echo "changed_files=$CHANGED_FILES" >> $GITHUB_OUTPUT
+          echo "✅ Changed files detected"
 
-      - name: Validate JSON schema
-        id: validate-schema
-        if: steps.get-changes.outputs.all_changed_files != ''
+      - name: Validate JSON files
+        id: validation
+        if: env.CHANGED_FILES != ''
         run: |
-          sudo apt-get install -y python3 python3-pip
-          pip3 install jsonschema
+          echo "Starting validation..."
+          
+          # Install Python jika belum ada
+          if ! command -v python3 &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y python3
+          fi
           
           ALL_VALID=true
-          for file in ${{ steps.get-changes.outputs.all_changed_files }}; do
-            if [[ -f "$file" && "$file" =~ \.json$ ]]; then
-              echo "🔍 Validating $file..."
+          VALIDATION_LOG=""
+          
+          # Pisahkan file yang berubah menjadi array
+          IFS=' ' read -r -a FILES_ARRAY <<< "${{ steps.get-changes.outputs.changed_files }}"
+          
+          for file_path in "${FILES_ARRAY[@]}"; do
+            # Hanya proses file JSON
+            if [[ -f "$file_path" ]] && [[ "$file_path" == *.json ]]; then
+              echo ""
+              echo "=== Validating: $file_path ==="
               
-              # Validasi 1: Struktur JSON dasar
-              if ! python3 -m json.tool "$file" > /dev/null 2>&1; then
-                echo "❌ $file: Invalid JSON format"
+              # 1. Cek apakah file bisa dibaca sebagai JSON
+              if ! python3 -m json.tool "$file_path" > /dev/null 2>&1; then
+                echo "❌ ERROR: Invalid JSON format"
+                VALIDATION_LOG+="❌ $file_path: Invalid JSON format\n"
                 ALL_VALID=false
                 continue
               fi
               
+              # 2. Parse file JSON
               RECORD_TYPE=$(python3 -c "
-              import json, sys
-              try:
-                  data = json.load(open('$file'))
-                  print(data.get('record', {}).get('type', '').upper())
-              except:
-                  print('ERROR')
-              ")
+import json, sys
+try:
+    with open('$file_path') as f:
+        data = json.load(f)
+    record_type = data.get('record', {}).get('type', '').strip().upper()
+    print(record_type if record_type else 'EMPTY')
+except Exception as e:
+    print(f'PARSE_ERROR: {e}')
+")
               
-              if [[ "$RECORD_TYPE" != "CNAME" && "$RECORD_TYPE" != "A" ]]; then
-                echo "❌ $file: Hanya CNAME dan A record yang diizinkan. Ditemukan: $RECORD_TYPE"
+              echo "Record type detected: $RECORD_TYPE"
+              
+              # 3. Validasi tipe record
+              if [[ "$RECORD_TYPE" != "CNAME" ]] && [[ "$RECORD_TYPE" != "A" ]]; then
+                echo "❌ ERROR: Only CNAME and A records allowed. Found: $RECORD_TYPE"
+                VALIDATION_LOG+="❌ $file_path: Only CNAME/A allowed. Found: $RECORD_TYPE\n"
                 ALL_VALID=false
                 continue
               fi
               
-              if [[ "$RECORD_TYPE" = "CNAME" ]]; then
+              # 4. Validasi berdasarkan tipe
+              if [[ "$RECORD_TYPE" == "CNAME" ]]; then
                 VALUE=$(python3 -c "
-                import json, re
-                data = json.load(open('$file'))
-                value = data.get('record', {}).get('value', '')
-                print(value)
-                ")
+import json, re
+with open('$file_path') as f:
+    data = json.load(f)
+value = data.get('record', {}).get('value', '').strip()
+print(value)
+")
                 
-                if [[ ! "$VALUE" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
-                  echo "❌ $file: Format CNAME value tidak valid: $VALUE"
-                  ALL_VALID=false
-                fi
-              
-              elif [[ "$RECORD_TYPE" = "A" ]]; then
-                VALUE=$(python3 -c "
-                import json, re
-                data = json.load(open('$file'))
-                value = data.get('record', {}).get('value', '')
-                print(value)
-                ")
+                echo "CNAME value: $VALUE"
                 
-                if [[ ! "$VALUE" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-                  echo "❌ $file: Format IPv4 address tidak valid: $VALUE"
+                # Validasi format domain
+                if [[ ! "$VALUE" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+                  echo "❌ ERROR: Invalid CNAME format"
+                  VALIDATION_LOG+="❌ $file_path: Invalid CNAME value: $VALUE\n"
                   ALL_VALID=false
                 else
+                  echo "✅ CNAME format valid"
+                fi
+              
+              elif [[ "$RECORD_TYPE" == "A" ]]; then
+                VALUE=$(python3 -c "
+import json
+with open('$file_path') as f:
+    data = json.load(f)
+value = data.get('record', {}).get('value', '').strip()
+print(value)
+")
+                
+                echo "A record value: $VALUE"
+                
+                # Validasi IPv4
+                if [[ ! "$VALUE" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                  echo "❌ ERROR: Invalid IPv4 format"
+                  VALIDATION_LOG+="❌ $file_path: Invalid IPv4: $VALUE\n"
+                  ALL_VALID=false
+                else
+                  # Validasi setiap oktet
                   IFS='.' read -r -a OCTETS <<< "$VALUE"
+                  OCTET_VALID=true
                   for octet in "${OCTETS[@]}"; do
                     if (( octet < 0 || octet > 255 )); then
-                      echo "❌ $file: Octet tidak valid: $octet"
-                      ALL_VALID=false
+                      OCTET_VALID=false
+                      break
                     fi
                   done
+                  
+                  if [ "$OCTET_VALID" = false ]; then
+                    echo "❌ ERROR: Invalid octet in IPv4"
+                    VALIDATION_LOG+="❌ $file_path: Invalid octet in: $VALUE\n"
+                    ALL_VALID=false
+                  else
+                    echo "✅ IPv4 format valid"
+                  fi
                 fi
               fi
               
-              if [[ "$ALL_VALID" = true ]]; then
-                echo "✅ $file: Valid"
+              # 5. Validasi TTL jika ada
+              TTL=$(python3 -c "
+import json
+with open('$file_path') as f:
+    data = json.load(f)
+ttl = data.get('record', {}).get('ttl')
+print(ttl if ttl is not None else 'NOT_SET')
+")
+              
+              if [[ "$TTL" != "NOT_SET" ]]; then
+                if (( TTL < 120 || TTL > 7200 )); then
+                  echo "⚠️ WARNING: TTL $TTL outside recommended range (120-7200)"
+                fi
+              fi
+              
+              if [ "$ALL_VALID" = true ]; then
+                VALIDATION_LOG+="✅ $file_path: Valid $RECORD_TYPE record\n"
               fi
             fi
           done
           
-          if [[ "$ALL_VALID" = true ]]; then
+          echo ""
+          echo "=== VALIDATION SUMMARY ==="
+          echo -e "$VALIDATION_LOG"
+          
+          if [ "$ALL_VALID" = true ]; then
+            echo "✅ All files are valid!"
             echo "is_valid=true" >> $GITHUB_OUTPUT
-            echo "✅ Semua file valid!"
           else
+            echo "❌ Some files failed validation"
             echo "is_valid=false" >> $GITHUB_OUTPUT
-            echo "❌ Beberapa file tidak valid. Lihat detail di atas."
             exit 1
           fi
 
@@ -133,67 +206,122 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
         run: |
+          echo "🚀 Starting DNS update..."
+          
+          # Install requests library
+          python3 -m pip install requests
+          
           python3 << 'EOF'
-          import os, json, sys
-          import requests
-          
-          ZONE_ID = os.getenv('CLOUDFLARE_ZONE_ID')
-          API_TOKEN = os.getenv('CLOUDFLARE_API_TOKEN')
-          BASE_URL = "https://api.cloudflare.com/client/v4"
-          HEADERS = {
-              "Authorization": f"Bearer {API_TOKEN}",
-              "Content-Type": "application/json"
-          }
-          
-          changed_files = "${{ needs.validate.outputs.changed_files }}".split()
-          
-          for file_path in changed_files:
-              if not file_path.endswith('.json'):
-                  continue
-                  
-              with open(file_path) as f:
-                  config = json.load(f)
-              
-              subdomain = config['subdomain']
-              record_data = config['record']
-              
-              domain_name = f"{subdomain}.codesigmax.com" if subdomain != '@' else "codesigmax.com"
-              
-              response = requests.get(
-                  f"{BASE_URL}/zones/{ZONE_ID}/dns_records",
-                  headers=HEADERS,
-                  params={"name": domain_name, "type": record_data['type']}
-              )
-              
-              existing_records = response.json().get('result', [])
-              
-              payload = {
-                  "type": record_data['type'],
-                  "name": domain_name,
-                  "content": record_data['value'],
-                  "ttl": record_data.get('ttl', 3600),
-                  "proxied": record_data.get('proxied', record_data['type'] == 'A')
-              }
-              
-              if existing_records:
-                  record_id = existing_records[0]['id']
-                  response = requests.put(
-                      f"{BASE_URL}/zones/{ZONE_ID}/dns_records/{record_id}",
-                      headers=HEADERS,
-                      json=payload
-                  )
-                  action = "updated"
-              else:
-                  response = requests.post(
-                      f"{BASE_URL}/zones/{ZONE_ID}/dns_records",
-                      headers=HEADERS,
-                      json=payload
-                  )
-                  action = "created"
-              
-              if response.status_code in [200, 201]:
-                  print(f"✅ {record_data['type']} record for {domain_name} {action}")
-              else:
-                  print(f"❌ Failed to {action} {domain_name}: {response.text}")
-                  sys.exit(1)
-          EOF
+import os, json, sys
+import requests
+
+ZONE_ID = os.getenv('CLOUDFLARE_ZONE_ID')
+API_TOKEN = os.getenv('CLOUDFLARE_API_TOKEN')
+BASE_URL = "https://api.cloudflare.com/client/v4"
+HEADERS = {
+    "Authorization": f"Bearer {API_TOKEN}",
+    "Content-Type": "application/json"
+}
+
+# Ambil daftar file yang berubah
+changed_files = """${{ needs.validate.outputs.changed_files }}""".strip()
+
+if not changed_files:
+    print("⚠️ No changed files to process")
+    sys.exit(0)
+
+print(f"Processing files: {changed_files}")
+file_list = changed_files.split()
+
+for file_path in file_list:
+    if not file_path.endswith('.json'):
+        continue
+    
+    print(f"\n📄 Processing: {file_path}")
+    
+    try:
+        with open(file_path) as f:
+            config = json.load(f)
+    except Exception as e:
+        print(f"❌ Failed to read {file_path}: {e}")
+        continue
+    
+    subdomain = config.get('subdomain', '').strip()
+    if not subdomain:
+        print(f"❌ Missing 'subdomain' in {file_path}")
+        continue
+    
+    record_data = config.get('record', {})
+    if not record_data:
+        print(f"❌ Missing 'record' in {file_path}")
+        continue
+    
+    # Tentukan nama domain lengkap
+    if subdomain == '@':
+        domain_name = "codesigmax.com"
+    else:
+        domain_name = f"{subdomain}.codesigmax.com"
+    
+    print(f"  Domain: {domain_name}")
+    print(f"  Type: {record_data.get('type')}")
+    print(f"  Value: {record_data.get('value')}")
+    
+    # Cek apakah record sudah ada
+    try:
+        response = requests.get(
+            f"{BASE_URL}/zones/{ZONE_ID}/dns_records",
+            headers=HEADERS,
+            params={
+                "name": domain_name,
+                "type": record_data.get('type')
+            }
+        )
+        
+        if response.status_code != 200:
+            print(f"❌ API Error: {response.status_code} - {response.text}")
+            continue
+        
+        existing_records = response.json().get('result', [])
+        
+        # Siapkan payload
+        payload = {
+            "type": record_data.get('type'),
+            "name": domain_name,
+            "content": record_data.get('value'),
+            "ttl": record_data.get('ttl', 3600),
+            "proxied": record_data.get('proxied', record_data.get('type') == 'A')
+        }
+        
+        if existing_records:
+            # Update existing
+            record_id = existing_records[0]['id']
+            response = requests.put(
+                f"{BASE_URL}/zones/{ZONE_ID}/dns_records/{record_id}",
+                headers=HEADERS,
+                json=payload
+            )
+            action = "updated"
+        else:
+            # Create new
+            response = requests.post(
+                f"{BASE_URL}/zones/{ZONE_ID}/dns_records",
+                headers=HEADERS,
+                json=payload
+            )
+            action = "created"
+        
+        if response.status_code in [200, 201]:
+            result = response.json()
+            if result.get('success'):
+                print(f"✅ Successfully {action} DNS record")
+            else:
+                print(f"⚠️ Cloudflare API warning: {result.get('errors', [])}")
+        else:
+            print(f"❌ Failed to {action}: {response.status_code} - {response.text}")
+            
+    except Exception as e:
+        print(f"❌ Exception: {e}")
+        continue
+
+print("\n🎉 DNS update process completed")
+EOF
