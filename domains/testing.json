@@ -1,0 +1,9 @@
+{
+  "subdomain": "testing",
+  "record": {
+    "type": "CNAME",
+    "value": "adjisoft.github.io",
+    "ttl": 3600,
+    "proxied": true
+  }
+}
